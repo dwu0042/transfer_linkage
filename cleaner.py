@@ -3,7 +3,7 @@ import overlap_fixer as ovfxr
 from functools import partial
 
 _nulls = [
-    "", "NA", "na", "Na", "N/A", "n/a", "N/a", "NaN", "''", " "
+    "", "NA", "na", "Na", "N/A", "n/a", "N/a", "NaN", "''", " ", "NULL",
 ]
 
 class DataHandlingError(Exception):
@@ -154,7 +154,7 @@ def fix_overlapping_stays(chunk:pl.DataFrame, verbose=True):
     # clean the overlaps
     raw_cleaned = ovfxr.clean_overlaps(data)
 
-    # coerce back into the correct format
+    # coerce back into the correct format17:47
     new_stays = pl.from_records(list(zip(*raw_cleaned)), schema=schema)
     compat_sid_col = pl.concat([chunk.select('sID'), new_stays], how='horizontal').fill_null(strategy='forward')
 
