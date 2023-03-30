@@ -1,5 +1,4 @@
-import pytest
-import overlap_fixer
+from transfer_linkage import overlap_fixer
 
 
 def test_simple_overlap():

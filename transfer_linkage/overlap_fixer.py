@@ -1,4 +1,3 @@
-import datetime
 from collections import deque
 
 def clean_overlaps(chunk):

@@ -1,6 +1,6 @@
 import polars as pl
-import overlap_fixer as ovfxr
 from functools import partial
+from . import overlap_fixer as ovfxr
 
 _nulls = [
     "", "NA", "na", "Na", "N/A", "n/a", "N/a", "NaN", "''", " ", "NULL",

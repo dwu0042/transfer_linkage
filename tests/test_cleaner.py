@@ -1,5 +1,5 @@
 import polars as pl
-import cleaner
+from transfer_linkage import cleaner
 
 def test_overall():
     database = cleaner.ingest_csv("fakedb_werr.data.table")
