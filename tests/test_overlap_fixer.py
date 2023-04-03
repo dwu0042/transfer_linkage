@@ -68,3 +68,16 @@ def test_continuity_case():
         ('a', 1, 2),
         ('a', 2, 4),
     ]
+
+def test_concurrent_overlap():
+    data = [
+        ('a', 1, 4),
+        ('b', 2, 4),
+    ]
+
+    fixed_intervals = overlap_fixer.clean_overlaps(data)
+
+    assert fixed_intervals == [
+        ('a', 1, 2),
+        ('b', 2, 4),
+    ]

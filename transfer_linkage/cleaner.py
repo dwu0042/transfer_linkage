@@ -30,41 +30,14 @@ def clean_database(
     verbose=True,
     **kwargs):
 
-    # Check column existence
-    expected_cols = {subject_id, facility_id, admission_date, discharge_date}
-    found_cols = set(database.columns)
-    missing_cols = expected_cols.difference (found_cols)
-    if len(missing_cols):
-        raise DataHandlingError(f"Column(s) {', '.join(missing_cols)} provided as argument were not found in the database.")
+    report = standardise_column_names(database, subject_id, facility_id, admission_date, discharge_date, verbose)
 
-    # Standardise column names
-    report = database.rename({
-        subject_id: 'sID',
-        facility_id: 'fID',
-        admission_date: 'Adate',
-        discharge_date: 'Ddate',
-    })
-
-    # Check data format, column names, variable format, parse dates
-    if convert_dates:
-        date_expressions = [
-            pl.col('Adate').str.strptime(pl.Date, fmt=date_format),
-            pl.col('Ddate').str.strptime(pl.Date, fmt=date_format),
-        ]
-    else:
-        [
-            pl.col('Adate').cast(pl.Utf8),
-            pl.col('Ddate').cast(pl.Utf8)
-        ]
-    # Coerce types
-    report = report.with_columns([
-        pl.col('sID').cast(pl.Utf8),
-        pl.col('fID').cast(pl.Utf8),
-        *date_expressions,
-    ])
+    report = coerce_data_types(report, convert_dates, date_format, verbose)
 
     # Trim auxiliary data
     if not retain_auxiliary_data:
+        if verbose:
+            print("Trimming auxiliary data...")
         report = report.select(pl.col('sID', 'fID', 'Adate', 'Ddate'))
 
     # Check and clean missing values
@@ -74,18 +47,71 @@ def clean_database(
     report = clean_erroneous_records(report, delete_errors=delete_errors, verbose=verbose)
 
     # remove row duplicates
+    if verbose:
+        print("Removing duplicate records...")
     report = report.unique()
 
     # Fix overlapping stays
-    subject_chunks = report.partition_by('sID')
-    overlap_fixing_method = partial(fix_overlapping_stays, verbose=verbose)
-    report = pl.concat(map(overlap_fixing_method, subject_chunks))
+    report = fix_all_overlaps(report, verbose, **kwargs)
 
     return report
+
+def standardise_column_names(df:pl.DataFrame, subject_id="sID", facility_id="fID", admission_date='Adate', discharge_date='Ddate', verbose=True):
+    """Check and standardise column names for further processing"""
+
+    # Check column existence
+    if verbose:
+        print("Checking existence of columns...")
+    expected_cols = {subject_id, facility_id, admission_date, discharge_date}
+    found_cols = set(df.columns)
+    missing_cols = expected_cols.difference (found_cols)
+    if len(missing_cols):
+        raise DataHandlingError(f"Column(s) {', '.join(missing_cols)} provided as argument were not found in the database.")
+    elif verbose:
+        print("Column existence OK.")
+
+    # Standardise column names
+    if verbose:
+        print("Standardising column names...")
+    return df.rename({
+        subject_id: 'sID',
+        facility_id: 'fID',
+        admission_date: 'Adate',
+        discharge_date: 'Ddate',
+    })
+
+def coerce_data_types(database:pl.DataFrame, convert_dates=False, date_format=r'%Y-%m-%d', verbose=True):
+        # Check data format, column names, variable format, parse dates
+    if verbose:
+        print("Coercing types...")
+    if convert_dates:
+        if verbose:
+            print("Converting dates...")
+        date_expressions = [
+            pl.col('Adate').str.strptime(pl.Datetime, fmt=date_format),
+            pl.col('Ddate').str.strptime(pl.Datetime, fmt=date_format),
+        ]
+    else:
+        # do nothing
+        date_expressions = [
+            pl.col('Adate'),
+            pl.col('Ddate')
+        ]
+    # Coerce types
+    database = database.with_columns([
+        pl.col('sID').cast(pl.Utf8),
+        pl.col('fID').cast(pl.Utf8),
+        *date_expressions,
+    ])
+    if verbose:
+        print("Type coercion done.")
+    return database
 
 def clean_missing_values(database:pl.DataFrame, delete_missing=False, verbose=True):
     """Checks for and potentially deletes recods with missing values"""
     # Check for missing values
+    if verbose:
+        print("Checking for missing values...")
     missing_records = database.filter(
         pl.any(pl.col('*').is_null()) | 
         pl.any(pl.col('sID', 'fID').str.strip() == '')
@@ -115,7 +141,8 @@ def clean_erroneous_records(database:pl.DataFrame, delete_errors=False, verbose=
     
     Erroneous records are when the discharge date is recrded as before the admission date
     """
-
+    if verbose:
+        print("Checking for erroneous records...")
     erroneous_records = database.filter(
         pl.col('Adate') > pl.col('Ddate')
     )
@@ -136,13 +163,28 @@ def clean_erroneous_records(database:pl.DataFrame, delete_errors=False, verbose=
     # no errors, return as-is
     return database
 
-def fix_overlapping_stays(chunk:pl.DataFrame, verbose=True):
+def fix_all_overlaps(database:pl.DataFrame, verbose=True, **kwargs):
+    if verbose:
+        print("Finding and fixing overlapping records...")
+    subject_chunks = database.partition_by('sID')
+    record_log = []
+    overlap_fixing_method = partial(fix_overlapping_stays, record_log=record_log, verbose=verbose, **kwargs)
+    database = pl.concat(map(overlap_fixing_method, subject_chunks))
+    if verbose:
+        print(f"Found and fixed {len(record_log)} individuals with overlapping records.")
+    return database
+
+def fix_overlapping_stays(chunk:pl.DataFrame, verbose=True, record_log=None):
     """Fix overlapping stays for a single given subject"""
 
     # check for overlaps
     has_overlaps = any(chunk.select('Adate')[1:,:].to_series() < chunk.select('Ddate')[:-1,:].to_series())
-    if has_overlaps and verbose:
-        print(f"Individual {chunk.select('sID')[0].item()} has overlapping records. Fixing...")
+    if has_overlaps: 
+        if verbose:
+            if record_log is None:
+                print(f"Individual {chunk.select('sID')[0,].item()} has overlapping records. Fixing...")
+            else:
+                record_log.append(chunk.select('sID')[0,].item())
     else:
         return chunk
 
@@ -154,7 +196,7 @@ def fix_overlapping_stays(chunk:pl.DataFrame, verbose=True):
     # clean the overlaps
     raw_cleaned = ovfxr.clean_overlaps(data)
 
-    # coerce back into the correct format17:47
+    # coerce back into the correct format
     new_stays = pl.from_records(list(zip(*raw_cleaned)), schema=schema)
     compat_sid_col = pl.concat([chunk.select('sID'), new_stays], how='horizontal').fill_null(strategy='forward')
 
