@@ -1,6 +1,6 @@
 import polars as pl
 from functools import partial
-from . import overlap_fixer as ovfxr
+from . import overlap_fixer as ovlfxr
 
 _nulls = [
     "", "NA", "na", "Na", "N/A", "n/a", "N/a", "NaN", "''", " ", "NULL",
@@ -27,8 +27,9 @@ def clean_database(
     admission_date='Adate',
     discharge_date='Ddate',
     retain_auxiliary_data=True,
-    verbose=True,
-    **kwargs):
+    n_iters=100,
+    verbose=True
+    ):
 
     report = standardise_column_names(database, subject_id, facility_id, admission_date, discharge_date, verbose)
 
@@ -52,7 +53,7 @@ def clean_database(
     report = report.unique()
 
     # Fix overlapping stays
-    report = fix_all_overlaps(report, verbose, **kwargs)
+    report = fix_all_overlaps(report, n_iters, verbose)
 
     return report
 
@@ -163,41 +164,14 @@ def clean_erroneous_records(database:pl.DataFrame, delete_errors=False, verbose=
     # no errors, return as-is
     return database
 
-def fix_all_overlaps(database:pl.DataFrame, verbose=True, **kwargs):
+def fix_all_overlaps(database:pl.DataFrame, n_iters=100, verbose=True):
     if verbose:
         print("Finding and fixing overlapping records...")
-    subject_chunks = database.partition_by('sID')
-    record_log = []
-    overlap_fixing_method = partial(fix_overlapping_stays, record_log=record_log, verbose=verbose, **kwargs)
-    database = pl.concat(map(overlap_fixing_method, subject_chunks))
+
+    database = ovlfxr.fix_overlaps(database, iters=n_iters, verbose=verbose)
+
     if verbose:
-        print(f"Found and fixed {len(record_log)} individuals with overlapping records.")
+        n_overlaps = ovlfxr.num_overlaps(database)
+        print(n_overlaps, "overlaps remaining after iterations...")
+
     return database
-
-def fix_overlapping_stays(chunk:pl.DataFrame, verbose=True, record_log=None):
-    """Fix overlapping stays for a single given subject"""
-
-    # check for overlaps
-    has_overlaps = any(chunk.select('Adate')[1:,:].to_series() < chunk.select('Ddate')[:-1,:].to_series())
-    if has_overlaps: 
-        if verbose:
-            if record_log is None:
-                print(f"Individual {chunk.select('sID')[0,].item()} has overlapping records. Fixing...")
-            else:
-                record_log.append(chunk.select('sID')[0,].item())
-    else:
-        return chunk
-
-    schema = chunk.columns[1:]
-
-    # extract stay info
-    data = zip(*(chunk.select(pl.exclude('sID')).sort('Adate')))
-
-    # clean the overlaps
-    raw_cleaned = ovfxr.clean_overlaps(data)
-
-    # coerce back into the correct format
-    new_stays = pl.from_records(list(zip(*raw_cleaned)), schema=schema)
-    compat_sid_col = pl.concat([chunk.select('sID'), new_stays], how='horizontal').fill_null(strategy='forward')
-
-    return compat_sid_col

@@ -1,72 +1,123 @@
-from collections import deque
-from enum import Enum
-from functools import total_ordering
+import polars as pl
+from time import perf_counter as tic
+from typing import Iterable
 
-@total_ordering
-class EventClass(Enum):
-    start = 0
-    end = 1
+def scan_overlaps(df: pl.DataFrame):
+    """Creates a LazyFrame of the overlaps present in teh dataframe"""
+    overlaps = (df.lazy()
+        # ensure sorted
+        .sort('sID', 'Adate', 'Ddate')
+        # map up next row
+        .filter(
+            pl.col('sID').eq(pl.col('sID').shift(-1)) 
+            & pl.col('Adate').shift(-1).lt(pl.col('Ddate'))
+        )
+    )
 
-    def __lt__(self, other):
-        if self.__class__ is other.__class__:
-            return self.value < other.value
-        return NotImplemented
+    return overlaps
 
-def clean_overlaps(chunk):
-    breakable_input = transform(chunk)
-    cleaned = slow_break(breakable_input)
-    return inverse_transform(cleaned)
+def num_overlaps(df: pl.DataFrame):
+    return scan_overlaps(df).collect().height
 
-def transform(intervals):
-    return sorted([(date, xid, category) 
-                   for xid, *dates in intervals 
-                   for date, category in zip(dates, [EventClass.start, EventClass.end])
-                  ])
+def fix_overlaps_single_iter(df: pl.DataFrame):
+    """Performs one iteration of overlap correction on successive presence events"""
 
-def inverse_transform(events):
-    intervals = []
-    for i in range(int(len(events)//2)):
-        start = events[2*i]
-        end = events[2*i+1]
-        assert start[1] == end[1]
-        intervals.append((start[1], start[0], end[0]))
-    return intervals
+    # expression to filter out non-overlaps (assigns nulls)
+    reject_no_overlaps = (pl.when(pl.col('sID').ne(pl.col('sID_next')))
+        .then(None)
+        .when(pl.col('Adate_next').ge(pl.col('Ddate')))
+        .then(None)
+    )
 
-def slow_break(times:list):
-    times.sort()
+    # Update Adate and Ddate based on sequential overlaps
+    # and generate auxiliary info for additional intervals
+    # We will explicitly use LazyFrame until the return to allow for optimisation
+    updated_frame = (df.lazy()
+        # ensure sorted
+        .sort('sID', 'Adate', 'Ddate')
+        # map up next row
+        .with_columns(
+            pl.col('sID', 'fID', 'Adate', 'Ddate').shift(-1).map_alias(lambda x: f"{x}_next"),
+        )
+        # logic for new intervals
+        # observation: If we have an overlap between successive intervals, we can update by shifting 
+        #   only the Ddate of the left interval and Adate of the right interval.
+        #   In cases where the left interval completely covers the right interval, we will also need an extra
+        #   interval, constructed between the two Ddates
+        .with_columns(
+            # updating the right hand time for the current row
+            (reject_no_overlaps
+            .when(pl.col('Adate_next').eq(pl.col('Adate'))).then(pl.col('Ddate'))
+            .when(pl.col('Adate_next').gt(pl.col('Adate'))).then(pl.col('Adate_next'))
+            ).alias('Ddate_new'),
+            # updating the left hand time for the next entry
+            (reject_no_overlaps
+            .when(pl.col('Adate_next').eq(pl.col('Adate'))).then(pl.col('Ddate'))
+            .when(pl.col('Adate_next').gt(pl.col('Adate'))).then(pl.col('Adate_next'))
+            ).alias('Adate_next_new'),
+            # a new row for encapsualted intervals
+            (reject_no_overlaps
+            .when(pl.col('Ddate') > pl.col('Ddate_next')).then(pl.col('Ddate_next'))
+            ).alias('ExtraAdate'),
+            (reject_no_overlaps
+            .when(pl.col('Ddate') > pl.col('Ddate_next')).then(pl.col('Ddate'))
+            ).alias('ExtraDdate'),
+        )
+        # prune columns
+        .drop('sID_next', 'fID_next', 'Adate_next', 'Ddate_next')
+        # shift back Adate_next
+        .with_columns(
+            pl.col('Adate_next_new').shift(1)
+        )
+        # Update the Adate and Ddate columns appropriately
+        # If the corr. _new col is not null, use it, other wise don't
+        .with_columns(
+            (pl.when(pl.col('Ddate_new').is_not_null())
+               .then(pl.col('Ddate_new')).otherwise(pl.col('Ddate'))
+            ).alias('Ddate'),
+            (pl.when(pl.col('Adate_next_new').is_not_null())
+               .then(pl.col('Adate_next_new')).otherwise(pl.col('Adate'))
+            ).alias('Adate'),
+        )
+        # Fix invalid intervals created by same-Adate situations with future overlaps
+        .with_columns(
+            (pl.col('Ddate') < pl.col('Adate')).alias('Anomaly')
+        )
+        .with_columns(
+            pl.when(pl.col('Anomaly')).then(pl.col('Ddate')).otherwise(pl.col('Adate')).alias('Adate'),
+            pl.when(pl.col('Anomaly').shift(-1)).then(pl.col('Ddate').shift(-1)).otherwise(pl.col('Ddate')).alias('Ddate')
+        )
+        .drop('Anomaly')
+    )
 
-    t, fid, state = None, None, None
-    records = []
-    stack = deque()
+    # join on extra intervals (formed by ExtraAdate and ExtraDdate)
+    original_frame = updated_frame.select('sID', 'fID', 'Adate', 'Ddate')
+    extra_frame = updated_frame.select(
+        pl.col('sID', 'fID'), 
+        pl.col('ExtraAdate').alias('Adate'), 
+        pl.col('ExtraDdate').alias('Ddate'),
+    ).filter(pl.all_horizontal(pl.col('Adate', 'Ddate').is_not_null()))
 
-    while times:
-        ti, fi, si = times.pop(0)
-        # 
-        if state is None and not stack:
-            fid = fi
-            assert si is EventClass.start
-            state = si
-            records.append((ti, fid, state))
-        elif si is EventClass.start and fi == fid:
-            records.append((ti, fid))
-            records.append((ti, fi))
-            stack.append(fid)
-        elif si is EventClass.start and fi != fid:
-            # overlapping admission. need to handle
-            stack.append(fid)
-            records.append((ti, fid))
-            fid = fi
-            records.append((ti, fi))
-        elif si is EventClass.end and fi == fid:
-            # done with this admission
-            records.append((ti, fi))
-            fid, state = None, None
-            if stack:
-                state = EventClass.start
-                fid = stack.pop()
-                records.append((ti, fid, state))
-        elif si is EventClass.end and fi != fid:
-            # record ends before we return to it
-            stack.remove(fi)
+    fixed_frame = pl.concat([original_frame, extra_frame]).sort('sID', 'Adate', 'Ddate')
 
-    return records
+    return fixed_frame.collect()
+
+def fix_overlaps(df: pl.DataFrame, iters: int=1, verbose=1):
+    _t = 0
+    if verbose: _t = tic()
+
+    zfs = []
+    for _i in range(iters):
+        overlaps = scan_overlaps(df).collect()
+        n_ov =  overlaps.height
+        known_dirty = overlaps.select('sID').to_series()
+        zfs.append(df.filter(pl.col('sID').is_in(known_dirty).is_not()))
+        df = df.filter(pl.col('sID').is_in(known_dirty))
+        df = fix_overlaps_single_iter(df)
+        if verbose:
+            _t0, _t = _t, tic()
+            print('Iteration', _i, ':', df.height, 'entries;', n_ov, 'overlaps;', _t-_t0, 's')
+        if n_ov == 0:
+            break
+    print([z.height for z in zfs])
+    return pl.concat([*zfs, df])
