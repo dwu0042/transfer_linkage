@@ -26,6 +26,8 @@ def clean_database(
     facility_id="fID",
     admission_date='Adate',
     discharge_date='Ddate',
+    subject_dtype=pl.Utf8,
+    facility_dtype=pl.Utf8,
     retain_auxiliary_data=True,
     n_iters=100,
     verbose=True
@@ -33,7 +35,7 @@ def clean_database(
 
     report = standardise_column_names(database, subject_id, facility_id, admission_date, discharge_date, verbose)
 
-    report = coerce_data_types(report, convert_dates, date_format, verbose)
+    report = coerce_data_types(report, convert_dates, date_format, subject_dtype, facility_dtype, verbose)
 
     # Trim auxiliary data
     if not retain_auxiliary_data:
@@ -81,7 +83,8 @@ def standardise_column_names(df:pl.DataFrame, subject_id="sID", facility_id="fID
         discharge_date: 'Ddate',
     })
 
-def coerce_data_types(database:pl.DataFrame, convert_dates=False, date_format=r'%Y-%m-%d', verbose=True):
+def coerce_data_types(database:pl.DataFrame, convert_dates=False, date_format=r'%Y-%m-%d', 
+                      subject_dtype=pl.Utf8, facility_dtype=pl.Utf8, verbose=True):
         # Check data format, column names, variable format, parse dates
     if verbose:
         print("Coercing types...")
@@ -100,8 +103,8 @@ def coerce_data_types(database:pl.DataFrame, convert_dates=False, date_format=r'
         ]
     # Coerce types
     database = database.with_columns([
-        pl.col('sID').cast(pl.Utf8),
-        pl.col('fID').cast(pl.Utf8),
+        pl.col('sID').cast(subject_dtype),
+        pl.col('fID').cast(facility_dtype),
         *date_expressions,
     ])
     if verbose:
