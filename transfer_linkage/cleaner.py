@@ -89,8 +89,8 @@ def coerce_data_types(database:pl.DataFrame, convert_dates=False, date_format=r'
         if verbose:
             print("Converting dates...")
         date_expressions = [
-            pl.col('Adate').str.strptime(pl.Datetime, fmt=date_format),
-            pl.col('Ddate').str.strptime(pl.Datetime, fmt=date_format),
+            pl.col('Adate').str.strptime(pl.Datetime, format=date_format),
+            pl.col('Ddate').str.strptime(pl.Datetime, format=date_format),
         ]
     else:
         # do nothing
